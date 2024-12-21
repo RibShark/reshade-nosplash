@@ -2680,7 +2680,7 @@ void reshade::runtime::draw_gui_statistics()
 		ImGui::TextUnformatted(g_target_executable_path.filename().u8string().c_str());
 		ImGui::Text("%.4d-%.2d-%.2d %d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec);
 #if RESHADE_FX
-		ImGui::Text("%ux%u", _effect_width, _effect_height);
+		ImGui::Text("%ux%u", _effect_permutations[0].width, _effect_permutations[0].height);
 #endif
 		ImGui::Text("%.2f fps", _imgui_context->IO.Framerate);
 #if RESHADE_FX
@@ -2699,7 +2699,7 @@ void reshade::runtime::draw_gui_statistics()
 		ImGui::Text("0x%X", static_cast<unsigned int>(std::hash<std::string>()(g_target_executable_path.stem().u8string()) & 0xFFFFFFFF));
 		ImGui::Text("%.0f ms", std::chrono::duration_cast<std::chrono::nanoseconds>(_last_present_time - _start_time).count() * 1e-6f);
 #if RESHADE_FX
-		ImGui::Text("Format %u (%u bpc)", static_cast<unsigned int>(_effect_color_format), api::format_bit_depth(_effect_color_format));
+		ImGui::Text("Format %u (%u bpc)", static_cast<unsigned int>(_effect_permutations[0].color_format), api::format_bit_depth(_effect_permutations[0].color_format));
 #endif
 		ImGui::Text("%*.3f ms", gpu_digits + 4, _last_frame_duration.count() * 1e-6f);
 #if RESHADE_FX
@@ -2726,8 +2726,8 @@ void reshade::runtime::draw_gui_statistics()
 			if (!tech.enabled)
 				continue;
 
-			if (tech.passes.size() > 1)
-				ImGui::Text("%s (%zu passes)", tech.name.c_str(), tech.passes.size());
+			if (tech.permutations[0].passes.size() > 1)
+				ImGui::Text("%s (%zu passes)", tech.name.c_str(), tech.permutations[0].passes.size());
 			else
 				ImGui::TextUnformatted(tech.name.c_str(), tech.name.c_str() + tech.name.size());
 
@@ -2870,17 +2870,17 @@ void reshade::runtime::draw_gui_statistics()
 				std::pair<size_t, std::vector<std::string>> &reference = references.emplace_back();
 				reference.first = tech.effect_index;
 
-				for (size_t pass_index = 0; pass_index < tech.passes.size(); ++pass_index)
+				for (size_t pass_index = 0; pass_index < tech.permutations[0].passes.size(); ++pass_index)
 				{
-					std::string pass_name = tech.passes[pass_index].name;
+					std::string pass_name = tech.permutations[0].passes[pass_index].name;
 					if (pass_name.empty())
 						pass_name = "pass " + std::to_string(pass_index);
 					pass_name = tech.name + ' ' + pass_name;
 
 					bool referenced = false;
-					for (const reshadefx::texture_binding &binding : tech.passes[pass_index].texture_bindings)
+					for (const reshadefx::texture_binding &binding : tech.permutations[0].passes[pass_index].texture_bindings)
 					{
-						if (_effects[tech.effect_index].module.samplers[binding.index].texture_name == tex.unique_name)
+						if (_effects[tech.effect_index].permutations[0].module.samplers[binding.index].texture_name == tex.unique_name)
 						{
 							referenced = true;
 							reference.second.emplace_back(pass_name + " (sampler)");
@@ -2888,9 +2888,9 @@ void reshade::runtime::draw_gui_statistics()
 						}
 					}
 
-					for (const reshadefx::storage_binding &binding : tech.passes[pass_index].storage_bindings)
+					for (const reshadefx::storage_binding &binding : tech.permutations[0].passes[pass_index].storage_bindings)
 					{
-						if (_effects[tech.effect_index].module.storages[binding.index].texture_name == tex.unique_name)
+						if (_effects[tech.effect_index].permutations[0].module.storages[binding.index].texture_name == tex.unique_name)
 						{
 							referenced = true;
 							reference.second.emplace_back(pass_name + " (storage)");
@@ -2898,7 +2898,7 @@ void reshade::runtime::draw_gui_statistics()
 						}
 					}
 
-					for (const std::string &render_target : tech.passes[pass_index].render_target_names)
+					for (const std::string &render_target : tech.permutations[0].passes[pass_index].render_target_names)
 					{
 						if (render_target == tex.unique_name)
 						{
@@ -4062,11 +4062,13 @@ void reshade::runtime::draw_technique_editor()
 			ImGui::PushStyleColor(ImGuiCol_Text, COLOR_RED);
 			ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
 
-			char label[128] = "";
-			ImFormatString(label, sizeof(label), _("[%s] failed to compile"), effect.source_file.filename().u8string().c_str());
+			{
+				char label[128] = "";
+				ImFormatString(label, sizeof(label), _("[%s] failed to compile"), effect.source_file.filename().u8string().c_str());
 
-			bool value = false;
-			ImGui::Checkbox(label, &value);
+				bool value = false;
+				ImGui::Checkbox(label, &value);
+			}
 
 			ImGui::PopItemFlag();
 
@@ -4165,17 +4167,24 @@ void reshade::runtime::draw_technique_editor()
 					}
 				}
 
-				if (!effect.generated_code.empty() &&
-					imgui::popup_button(_("Show compiled results"), 18.0f * _font_size))
+				for (size_t permutation_index = 0; permutation_index < effect.permutations.size(); ++permutation_index)
 				{
-					const bool open_generated_code = ImGui::MenuItem(_("Generated code"));
+					std::string label = _("Show compiled results");
+					if (effect.permutations.size() > 1)
+						label += " (" + std::to_string(permutation_index) + ")";
 
-					ImGui::EndPopup();
-
-					if (open_generated_code)
+					if (!effect.permutations[permutation_index].generated_code.empty() &&
+						imgui::popup_button(label.c_str(), 18.0f * _font_size))
 					{
-						open_code_editor(effect_index, std::string());
-						ImGui::CloseCurrentPopup();
+						const bool open_generated_code = ImGui::MenuItem(_("Generated code"));
+
+						ImGui::EndPopup();
+
+						if (open_generated_code)
+						{
+							open_code_editor(effect_index, permutation_index, std::string());
+							ImGui::CloseCurrentPopup();
+						}
 					}
 				}
 
@@ -4357,25 +4366,32 @@ void reshade::runtime::draw_technique_editor()
 					}
 				}
 
-				if (!effect.generated_code.empty() &&
-					imgui::popup_button(_("Show compiled results"), 18.0f * _font_size))
+				for (size_t permutation_index = 0; permutation_index < effect.permutations.size(); ++permutation_index)
 				{
-					const bool open_generated_code = ImGui::MenuItem(_("Generated code"));
+					std::string label = _("Show compiled results");
+					if (effect.permutations.size() > 1)
+						label += " (" + std::to_string(permutation_index) + ")";
 
-					ImGui::Separator();
-
-					std::string entry_point_name;
-					for (const std::pair<std::string, reshadefx::shader_type> &entry_point : effect.module.entry_points)
-						if (const auto assembly_it = effect.assembly_text.find(entry_point.first);
-							assembly_it != effect.assembly_text.end() && ImGui::MenuItem(entry_point.first.c_str()))
-							entry_point_name = entry_point.first;
-
-					ImGui::EndPopup();
-
-					if (open_generated_code || !entry_point_name.empty())
+					if (!effect.permutations[permutation_index].generated_code.empty() &&
+						imgui::popup_button(label.c_str(), 18.0f * _font_size))
 					{
-						open_code_editor(tech.effect_index, entry_point_name);
-						ImGui::CloseCurrentPopup();
+						const bool open_generated_code = ImGui::MenuItem(_("Generated code"));
+
+						ImGui::Separator();
+
+						std::string entry_point_name;
+						for (const std::pair<std::string, reshadefx::shader_type> &entry_point : effect.permutations[permutation_index].module.entry_points)
+							if (const auto assembly_it = effect.permutations[permutation_index].assembly_text.find(entry_point.first);
+								assembly_it != effect.permutations[permutation_index].assembly_text.end() && ImGui::MenuItem(entry_point.first.c_str()))
+								entry_point_name = entry_point.first;
+
+						ImGui::EndPopup();
+
+						if (open_generated_code || !entry_point_name.empty())
+						{
+							open_code_editor(tech.effect_index, permutation_index, entry_point_name);
+							ImGui::CloseCurrentPopup();
+						}
 					}
 				}
 
@@ -4469,15 +4485,15 @@ void reshade::runtime::draw_technique_editor()
 	}
 }
 
-void reshade::runtime::open_code_editor(size_t effect_index, const std::string &entry_point)
+void reshade::runtime::open_code_editor(size_t effect_index, size_t permutation_index, const std::string &entry_point)
 {
 	assert(effect_index < _effects.size());
 
 	const std::filesystem::path &path = _effects[effect_index].source_file;
 
 	if (const auto it = std::find_if(_editors.begin(), _editors.end(),
-			[effect_index, &path, &entry_point](const editor_instance &instance) {
-				return instance.effect_index == effect_index && instance.file_path == path && instance.generated && instance.entry_point_name == entry_point;
+			[effect_index, permutation_index, &path, &entry_point](const editor_instance &instance) {
+				return instance.effect_index == effect_index && instance.permutation_index == permutation_index && instance.file_path == path && instance.generated && instance.entry_point_name == entry_point;
 			});
 		it != _editors.end())
 	{
@@ -4486,7 +4502,7 @@ void reshade::runtime::open_code_editor(size_t effect_index, const std::string &
 	}
 	else
 	{
-		editor_instance instance { effect_index, path, entry_point, true, true };
+		editor_instance instance { effect_index, permutation_index, path, entry_point, true, true };
 		open_code_editor(instance);
 		_editors.push_back(std::move(instance));
 	}
@@ -4506,7 +4522,7 @@ void reshade::runtime::open_code_editor(size_t effect_index, const std::filesyst
 	}
 	else
 	{
-		editor_instance instance { effect_index, path, std::string(), true, false };
+		editor_instance instance { effect_index, std::numeric_limits<size_t>::max(), path, std::string(), true, false };
 		open_code_editor(instance);
 		_editors.push_back(std::move(instance));
 	}
@@ -4518,9 +4534,9 @@ void reshade::runtime::open_code_editor(editor_instance &instance) const
 	if (instance.generated)
 	{
 		if (instance.entry_point_name.empty())
-			instance.editor.set_text(effect.generated_code);
+			instance.editor.set_text(effect.permutations[instance.permutation_index].generated_code);
 		else
-			instance.editor.set_text(effect.assembly_text.at(instance.entry_point_name));
+			instance.editor.set_text(effect.permutations[instance.permutation_index].assembly_text.at(instance.entry_point_name));
 		instance.editor.set_readonly(true);
 		return; // Errors only apply to the effect source, not generated code
 	}
