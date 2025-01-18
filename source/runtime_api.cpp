@@ -1406,6 +1406,9 @@ void reshade::runtime::render_technique(api::effect_technique handle, api::comma
 	if (tech == nullptr)
 		return;
 
+	if (is_loading())
+		return; // Skip reload enqueue below when effects are already loading, to avoid enqueing an effect for creation that is already in the process of being created
+
 	if (rtv == 0)
 		return;
 	if (rtv_srgb == 0)
@@ -1445,9 +1448,6 @@ void reshade::runtime::render_technique(api::effect_technique handle, api::comma
 			_reload_create_queue.emplace_back(tech->effect_index, permutation_index);
 		return;
 	}
-
-	if (is_loading())
-		return;
 
 	if (!_is_in_present_call)
 		capture_state(cmd_list, _app_state);
@@ -1597,13 +1597,12 @@ bool reshade::runtime::open_overlay(bool /*open*/, api::input_source /*source*/)
 
 void reshade::runtime::set_color_space(api::color_space color_space)
 {
-	if (color_space == _back_buffer_color_space || color_space == api::color_space::unknown)
+	if (color_space == _back_buffer_color_space || color_space == api::color_space::unknown || !_is_initialized)
 		return;
 
-	// Force reinitialization with the updated color space
-	on_reset();
 	_back_buffer_color_space = color_space;
-	on_init();
+	_effect_permutations[0].color_space = color_space;
+	reload_effects();
 }
 
 void reshade::runtime::reload_effect_next_frame([[maybe_unused]] const char *effect_name)

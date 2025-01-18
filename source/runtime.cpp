@@ -274,8 +274,7 @@ bool reshade::runtime::on_init()
 	_height = back_buffer_desc.texture.height;
 	_back_buffer_format = api::format_to_default_typed(back_buffer_desc.texture.format);
 	_back_buffer_samples = back_buffer_desc.texture.samples;
-	if (api::color_space::unknown == _back_buffer_color_space)
-		_back_buffer_color_space = _swapchain->get_color_space();
+	_back_buffer_color_space = _swapchain->get_color_space();
 
 	// Create resolve texture and copy pipeline (do this before creating effect resources, to ensure correct back buffer format is set up)
 	if (back_buffer_desc.texture.samples > 1
@@ -583,6 +582,8 @@ void reshade::runtime::on_reset()
 	_queue_sync_fence = {};
 
 	_width = _height = 0;
+	_back_buffer_format = api::format::unknown;
+	_back_buffer_samples = 1;
 	_back_buffer_color_space = api::color_space::unknown;
 
 #if RESHADE_GUI
@@ -1583,12 +1584,12 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 
 	bool preprocessed = effect.preprocessed && permutation_index == 0;
 	bool compiled = effect.compiled && permutation_index == 0;
+	bool source_cached = false;
 	bool skip_optimization = false;
 	std::string code_preamble;
+	std::string source;
 	std::string errors;
 
-	bool source_cached = false;
-	std::string source;
 	if (!preprocessed && (preprocess_required || (source_cached = load_effect_cache(source_file.stem().u8string() + '-' + std::to_string(_renderer_id) + '-' + std::to_string(source_hash), "i", source)) == false))
 	{
 		reshadefx::preprocessor pp;
@@ -1614,6 +1615,7 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 
 			pp.add_macro_definition(definition.first, definition.second.empty() ? "1" : definition.second);
 		}
+		preprocessor_definitions.clear(); // Clear before reusing for used preprocessor definitions below
 
 		for (const std::filesystem::path &include_path : include_paths)
 			pp.add_include_path(include_path);
@@ -1654,6 +1656,24 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 				source = "// " + pragma_directive + source;
 			}
 
+			// Keep track of used preprocessor definitions (so they can be displayed in the overlay)
+			for (const std::pair<std::string, std::string> &definition : pp.used_macro_definitions())
+			{
+				if (definition.first.size() < 8 ||
+					definition.first[0] == '_' ||
+					definition.first.compare(0, 7, "BUFFER_") == 0 ||
+					definition.first.compare(0, 8, "RESHADE_") == 0 ||
+					definition.first.find("INCLUDE_") != std::string::npos)
+					continue;
+
+				preprocessor_definitions.emplace_back(definition.first, trim(definition.second));
+
+				// Write used preprocessor definitions to the cached source
+				source = "// " + definition.first + '=' + definition.second + '\n' + source;
+			}
+
+			std::sort(effect.definitions.begin(), effect.definitions.end());
+
 			// Do not cache if any special pragma directives were used, to ensure they are read again next time
 			if (!skip_optimization)
 				source_cached = save_effect_cache(source_file.stem().u8string() + '-' + std::to_string(_renderer_id) + '-' + std::to_string(source_hash), "i", source);
@@ -1661,27 +1681,7 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 
 		if (permutation_index == 0)
 		{
-			if (preprocessed)
-			{
-				// Keep track of used preprocessor definitions (so they can be displayed in the overlay)
-				effect.definitions.clear();
-				for (const std::pair<std::string, std::string> &definition : pp.used_macro_definitions())
-				{
-					if (definition.first.size() < 8 ||
-						definition.first[0] == '_' ||
-						definition.first.compare(0, 7, "BUFFER_") == 0 ||
-						definition.first.compare(0, 8, "RESHADE_") == 0 ||
-						definition.first.find("INCLUDE_") != std::string::npos)
-						continue;
-
-					effect.definitions.emplace_back(definition.first, trim(definition.second));
-
-					// Write used preprocessor definitions to the cached source
-					source = "// " + definition.first + '=' + definition.second + '\n' + source;
-				}
-
-				std::sort(effect.definitions.begin(), effect.definitions.end());
-			}
+			effect.definitions = std::move(preprocessor_definitions);
 
 			// Keep track of included files
 			effect.included_files = pp.included_files();
@@ -1690,35 +1690,32 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 	}
 	else
 	{
-		if (permutation_index == 0)
+		if (permutation_index == 0 && !source.empty())
 		{
-			if (!source.empty())
+			effect.definitions.clear();
+
+			// Read used preprocessor definitions and pragmas from the cached source
+			for (size_t offset = 0, next; source.compare(offset, 3, "// ") == 0; offset = next + 1)
 			{
-				effect.definitions.clear();
+				offset += 3;
+				next = source.find('\n', offset);
+				if (next == std::string::npos)
+					break;
 
-				// Read used preprocessor definitions and pragmas from the cached source
-				for (size_t offset = 0, next; source.compare(offset, 3, "// ") == 0; offset = next + 1)
+				if (source.compare(offset, 7, "#pragma") == 0)
 				{
-					offset += 3;
-					next = source.find('\n', offset);
-					if (next == std::string::npos)
-						break;
-
-					if (source.compare(offset, 7, "#pragma") == 0)
-					{
-						code_preamble += source.substr(offset, (next + 1) - offset);
-					}
-					else if (const size_t equals_index = source.find('=', offset);
-						equals_index != std::string::npos)
-					{
-						effect.definitions.emplace_back(
-							source.substr(offset, equals_index - offset),
-							source.substr(equals_index + 1, next - (equals_index + 1)));
-					}
+					code_preamble += source.substr(offset, (next + 1) - offset);
 				}
-
-				std::sort(effect.definitions.begin(), effect.definitions.end());
+				else if (const size_t equals_index = source.find('=', offset);
+					equals_index != std::string::npos)
+				{
+					effect.definitions.emplace_back(
+						source.substr(offset, equals_index - offset),
+						source.substr(equals_index + 1, next - (equals_index + 1)));
+				}
 			}
+
+			std::sort(effect.definitions.begin(), effect.definitions.end());
 		}
 	}
 
@@ -4389,7 +4386,10 @@ void reshade::runtime::save_texture(const texture &tex)
 	std::string filename = tex.unique_name;
 	filename += (_screenshot_format == 0 ? ".bmp" : _screenshot_format == 1 ? ".png" : ".jpg");
 
-	const std::filesystem::path screenshot_path = g_reshade_base_path / _screenshot_path / std::filesystem::u8path(filename);
+	const std::filesystem::path screenshot_path =
+		_screenshot_path.native().find(L'%') != std::wstring::npos ?
+		g_reshade_base_path / std::filesystem::u8path(filename) :
+		g_reshade_base_path / _screenshot_path / std::filesystem::u8path(filename);
 
 	_last_screenshot_save_successful = true;
 
@@ -4883,18 +4883,19 @@ void reshade::runtime::save_screenshot(const std::string_view postfix)
 {
 	const unsigned int screenshot_count = _screenshot_count;
 
-	std::string screenshot_name = expand_macro_string(_screenshot_name, {
-		{ "AppName", g_target_executable_path.stem().u8string() },
-#if RESHADE_FX
-		{ "PresetName",  _current_preset_path.stem().u8string() },
-		{ "Count", std::to_string(screenshot_count) }
-#endif
-	});
-
+	std::string screenshot_name = _screenshot_name;
 	screenshot_name += postfix;
 	screenshot_name += (_screenshot_format == 0 ? ".bmp" : _screenshot_format == 1 ? ".png" : ".jpg");
 
-	const std::filesystem::path screenshot_path = g_reshade_base_path / _screenshot_path / std::filesystem::u8path(screenshot_name);
+	const std::filesystem::path screenshot_path =
+		g_reshade_base_path / std::filesystem::u8path(
+			expand_macro_string((_screenshot_path / std::filesystem::u8path(screenshot_name)).u8string(), {
+				{ "AppName", g_target_executable_path.stem().u8string() },
+#if RESHADE_FX
+				{ "PresetName",  _current_preset_path.stem().u8string() },
+#endif
+				{ "Count", std::to_string(screenshot_count) }
+			}));
 
 	log::message(log::level::info, "Saving screenshot to '%s'.", screenshot_path.u8string().c_str());
 
@@ -5015,10 +5016,21 @@ void reshade::runtime::save_screenshot(const std::string_view postfix)
 }
 bool reshade::runtime::execute_screenshot_post_save_command(const std::filesystem::path &screenshot_path, unsigned int screenshot_count)
 {
-	if (_screenshot_post_save_command.empty() || _screenshot_post_save_command.extension() != L".exe")
+	if (_screenshot_post_save_command.empty())
 		return false;
 
+	const std::wstring ext = _screenshot_post_save_command.extension().native();
+
 	std::string command_line;
+	if (ext == L".bat" || ext == L".cmd")
+		command_line = "cmd /C call ";
+	else if (ext == L".ps1")
+		command_line = "powershell -File ";
+	else if (ext == L".py")
+		command_line = "python ";
+	else if (ext != L".exe")
+		return false;
+
 	command_line += '\"';
 	command_line += _screenshot_post_save_command.u8string();
 	command_line += '\"';

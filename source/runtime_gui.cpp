@@ -2224,6 +2224,32 @@ void reshade::runtime::draw_gui_settings()
 
 		modified |= imgui::directory_input_box(_("Screenshot path"), _screenshot_path, _file_selection_path);
 
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+		{
+			ImGui::SetTooltip(_(
+				"Macros you can add that are resolved during saving:\n"
+				"  %%AppName%%         Name of the application (%s)\n"
+				"  %%PresetName%%      File name without extension of the current preset file (%s)\n"
+				"  %%Date%%            Current date in format '%s'\n"
+				"  %%DateYear%%        Year component of current date\n"
+				"  %%DateMonth%%       Month component of current date\n"
+				"  %%DateDay%%         Day component of current date\n"
+				"  %%Time%%            Current time in format '%s'\n"
+				"  %%TimeHour%%        Hour component of current time\n"
+				"  %%TimeMinute%%      Minute component of current time\n"
+				"  %%TimeSecond%%      Second component of current time\n"
+				"  %%TimeMS%%          Milliseconds fraction of current time\n"
+				"  %%Count%%           Number of screenshots taken this session\n"),
+				g_target_executable_path.stem().u8string().c_str(),
+#if RESHADE_FX
+				_current_preset_path.stem().u8string().c_str(),
+#else
+				"..."
+#endif
+				"yyyy-MM-dd",
+				"HH-mm-ss");
+		}
+
 		char name[260];
 		name[_screenshot_name.copy(name, sizeof(name) - 1)] = '\0';
 		if (ImGui::InputText(_("Screenshot name"), name, sizeof(name), ImGuiInputTextFlags_CallbackCharFilter, filter_name))
@@ -2284,9 +2310,9 @@ void reshade::runtime::draw_gui_settings()
 		modified |= imgui::file_input_box(_("Screenshot sound"), "sound.wav", _screenshot_sound_path, _file_selection_path, { L".wav" });
 		ImGui::SetItemTooltip(_("Audio file that is played when taking a screenshot."));
 
-		modified |= imgui::file_input_box(_("Post-save command"), "command.exe", _screenshot_post_save_command, _file_selection_path, { L".exe" });
+		modified |= imgui::file_input_box(_("Post-save command"), "command.bat", _screenshot_post_save_command, _file_selection_path, { L".exe", L".bat", L".cmd", L".ps1", L".py" });
 		ImGui::SetItemTooltip(_(
-			"Executable that is called after saving a screenshot.\n"
+			"Executable or script that is called after saving a screenshot.\n"
 			"This can be used to perform additional processing on the image (e.g. compressing it with an image optimizer)."));
 
 		char arguments[260];
@@ -4006,7 +4032,8 @@ void reshade::runtime::draw_variable_editor()
 					if (definition_scope == &effect_definitions)
 					{
 						ImGui::SameLine();
-						if (ImGui::SmallButton(ICON_FK_UNDO))
+						const std::string definition_undo_label = ICON_FK_UNDO"##" + definition_it->first;
+						if (ImGui::SmallButton(definition_undo_label.c_str()))
 						{
 							force_reload_effect = true;
 							definition_scope->erase(definition_it);
