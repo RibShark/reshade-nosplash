@@ -1616,10 +1616,7 @@ void reshade::runtime::draw_gui_home()
 
 		bool reload_preset = false;
 
-		// Loading state may change below, so keep track of current state so that 'ImGui::Push/Pop*' is executed the correct amount of times
-		const bool was_loading = is_loading();
-		if (was_loading)
-			ImGui::BeginDisabled();
+		ImGui::BeginDisabled(is_loading());
 
 		if (ImGui::ArrowButtonEx("<", ImGuiDir_Left, ImVec2(button_height, button_height), ImGuiButtonFlags_NoNavFocus))
 			if (switch_to_next_preset(_current_preset_path.parent_path(), true))
@@ -1750,8 +1747,7 @@ void reshade::runtime::draw_gui_home()
 
 		ImGui::SetItemTooltip(_("Add a new preset."));
 
-		if (was_loading)
-			ImGui::EndDisabled();
+		ImGui::EndDisabled();
 
 		ImGui::SetNextWindowPos(browse_button_pos + ImVec2(-_imgui_context->Style.WindowPadding.x, ImGui::GetFrameHeightWithSpacing()));
 		if (imgui::file_dialog("##browse", _file_selection_path, std::max(browse_button_width, 450.0f), { L".ini", L".txt" }, { _config_path, g_reshade_base_path / L"ReShade.ini" }))
@@ -4489,10 +4485,12 @@ void reshade::runtime::open_code_editor(editor_instance &instance) const
 
 	if (instance.generated)
 	{
+		const effect::permutation &permutation = effect.permutations[instance.permutation_index];
+
 		if (instance.entry_point_name.empty())
-			instance.editor.set_text(effect.permutations[instance.permutation_index].generated_code);
+			instance.editor.set_text(permutation.generated_code);
 		else
-			instance.editor.set_text(effect.permutations[instance.permutation_index].assembly_text.at(instance.entry_point_name));
+			instance.editor.set_text(permutation.assembly_text.at(instance.entry_point_name));
 		instance.editor.set_readonly(true);
 		return; // Errors only apply to the effect source, not generated code
 	}
@@ -4529,9 +4527,9 @@ void reshade::runtime::open_code_editor(editor_instance &instance) const
 }
 void reshade::runtime::draw_code_editor(editor_instance &instance)
 {
-	if (!instance.generated && (
-			ImGui::Button((ICON_FK_FLOPPY " " + std::string(_("Save"))).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) || (
-			_input != nullptr && _input->is_key_pressed('S', true, false, false))))
+	if (!instance.generated &&
+		(ImGui::Button((ICON_FK_FLOPPY " " + std::string(_("Save"))).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) ||
+			(_input != nullptr && _input->is_key_pressed('S', true, false, false))))
 	{
 		// Write current editor text to file
 		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"wb", SH_DENYWR))
