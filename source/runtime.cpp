@@ -636,6 +636,8 @@ void reshade::runtime::on_present(api::command_queue *present_queue)
 
 	update_effects();
 
+	_current_time = std::chrono::system_clock::now();
+
 	if (_should_save_screenshot && _screenshot_save_before && _effects_enabled && !_effects_rendered_this_frame)
 		save_screenshot("Before");
 
@@ -3691,11 +3693,12 @@ auto reshade::runtime::add_effect_permutation(uint32_t width, uint32_t height, a
 	assert(width != 0 && height != 0);
 	assert(color_format != api::format::unknown && stencil_format != api::format::unknown);
 
-	const api::format color_format_typeless = api::format_to_typeless(color_format);
+	// Handle sRGB and non-sRGB format variants as the same permutation (and use non-sRGB as color format, so that "BUFFER_COLOR_FORMAT" matches 'reshadefx::texture_format' values)
+	color_format = api::format_to_default_typed(color_format, 0);
 
 	if (const auto it = std::find_if(_effect_permutations.begin(), _effect_permutations.end(),
-			[width, height, color_space, color_format_typeless, stencil_format](const effect_permutation &permutation) {
-				return permutation.width == width && permutation.height == height && permutation.color_space == color_space && permutation.color_format == color_format_typeless && permutation.stencil_format == stencil_format;
+			[width, height, color_space, color_format, stencil_format](const effect_permutation &permutation) {
+				return permutation.width == width && permutation.height == height && permutation.color_space == color_space && permutation.color_format == color_format && permutation.stencil_format == stencil_format;
 			});
 		it != _effect_permutations.end())
 		return std::distance(_effect_permutations.begin(), it);
@@ -3704,35 +3707,29 @@ auto reshade::runtime::add_effect_permutation(uint32_t width, uint32_t height, a
 	permutation.width = width;
 	permutation.height = height;
 	permutation.color_space = color_space;
-	permutation.color_format = color_format_typeless;
+	permutation.color_format = color_format;
 
 	if (!_device->create_resource(
-			api::resource_desc(width, height, 1, 1, color_format_typeless, 1, api::memory_heap::gpu_only, api::resource_usage::copy_dest | api::resource_usage::shader_resource),
+			api::resource_desc(width, height, 1, 1, api::format_to_typeless(color_format), 1, api::memory_heap::gpu_only, api::resource_usage::copy_dest | api::resource_usage::shader_resource),
 			nullptr, api::resource_usage::shader_resource, &permutation.color_tex))
 	{
-		log::message(log::level::error, "Failed to create effect color resource (width = %u, height = %u, format = %u)!", width, height, static_cast<uint32_t>(color_format_typeless));
-
-		return std::numeric_limits<size_t>::max();
+		log::message(log::level::error, "Failed to create effect color resource (width = %u, height = %u, format = %u)!", width, height, static_cast<uint32_t>(api::format_to_typeless(color_format)));
+		goto exit_failure;
 	}
 
 	_device->set_resource_name(permutation.color_tex, "ReShade back buffer");
 
-	if (!_device->create_resource_view(permutation.color_tex, api::resource_usage::shader_resource, api::resource_view_desc(api::format_to_default_typed(color_format, 0)), &permutation.color_srv[0]) ||
+	if (!_device->create_resource_view(permutation.color_tex, api::resource_usage::shader_resource, api::resource_view_desc(color_format), &permutation.color_srv[0]) ||
 		!_device->create_resource_view(permutation.color_tex, api::resource_usage::shader_resource, api::resource_view_desc(api::format_to_default_typed(color_format, 1)), &permutation.color_srv[1]))
 	{
-		_device->destroy_resource_view(permutation.color_srv[1]);
-		_device->destroy_resource_view(permutation.color_srv[0]);
-		_device->destroy_resource(permutation.color_tex);
-
 		log::message(log::level::error, "Failed to create effect color resource view (format = %u)!", static_cast<uint32_t>(color_format));
-
-		return std::numeric_limits<size_t>::max();
+		goto exit_failure;
 	}
 
 	if (stencil_format != api::format::unknown &&
 		_device->create_resource(
-		api::resource_desc(width, height, 1, 1, stencil_format, 1, api::memory_heap::gpu_only, api::resource_usage::depth_stencil),
-		nullptr, api::resource_usage::depth_stencil_write, &permutation.stencil_tex))
+			api::resource_desc(width, height, 1, 1, stencil_format, 1, api::memory_heap::gpu_only, api::resource_usage::depth_stencil),
+			nullptr, api::resource_usage::depth_stencil_write, &permutation.stencil_tex))
 	{
 		permutation.stencil_format = stencil_format;
 
@@ -3740,14 +3737,8 @@ auto reshade::runtime::add_effect_permutation(uint32_t width, uint32_t height, a
 
 		if (!_device->create_resource_view(permutation.stencil_tex, api::resource_usage::depth_stencil, api::resource_view_desc(stencil_format), &permutation.stencil_dsv))
 		{
-			_device->destroy_resource_view(permutation.color_srv[1]);
-			_device->destroy_resource_view(permutation.color_srv[0]);
-			_device->destroy_resource(permutation.color_tex);
-			_device->destroy_resource(permutation.stencil_tex);
-
 			log::message(log::level::error, "Failed to create effect stencil resource view (format = %u)!", static_cast<uint32_t>(stencil_format));
-
-			return std::numeric_limits<size_t>::max();
+			goto exit_failure;
 		}
 	}
 	else
@@ -3759,6 +3750,14 @@ auto reshade::runtime::add_effect_permutation(uint32_t width, uint32_t height, a
 
 	_effect_permutations.push_back(permutation);
 	return _effect_permutations.size() - 1;
+
+exit_failure:
+	_device->destroy_resource_view(permutation.color_srv[1]);
+	_device->destroy_resource_view(permutation.color_srv[0]);
+	_device->destroy_resource(permutation.color_tex);
+	_device->destroy_resource(permutation.stencil_tex);
+
+	return std::numeric_limits<size_t>::max();
 }
 
 void reshade::runtime::update_effects()
@@ -3979,7 +3978,7 @@ void reshade::runtime::render_effects(api::command_list *cmd_list, api::resource
 				}
 				case special_uniform::date:
 				{
-					const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+					const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
 					struct tm tm; localtime_s(&tm, &t);
 
 					const int value[4] = {
@@ -4815,9 +4814,8 @@ template <> void reshade::runtime::set_uniform_value<uint32_t>(uniform &variable
 	}
 }
 
-static std::string expand_macro_string(const std::string &input, std::vector<std::pair<std::string, std::string>> macros)
+static std::string expand_macro_string(const std::string &input, std::vector<std::pair<std::string, std::string>> macros, std::chrono::system_clock::time_point now)
 {
-	const auto now = std::chrono::system_clock::now();
 	const auto now_seconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
 
 	char timestamp[21];
@@ -4936,7 +4934,7 @@ void reshade::runtime::save_screenshot(const std::string_view postfix)
 		{ "PresetName", _current_preset_path.stem().u8string() },
 		{ "BeforeAfter", std::string(postfix) },
 		{ "Count", std::to_string(screenshot_count) }
-	});
+	}, _current_time);
 
 	if (!postfix.empty() && _screenshot_name.find("%BeforeAfter%") == std::string::npos)
 	{
@@ -5085,7 +5083,7 @@ bool reshade::runtime::execute_screenshot_post_save_command(const std::filesyste
 			{ "TargetExt", screenshot_path.extension().u8string() },
 			{ "TargetName", screenshot_path.stem().u8string() },
 			{ "Count", std::to_string(screenshot_count) }
-		});
+		}, _current_time);
 	}
 
 	if (!utils::execute_command(command_line, g_reshade_base_path / _screenshot_post_save_command_working_directory, _screenshot_post_save_command_hide_window))
